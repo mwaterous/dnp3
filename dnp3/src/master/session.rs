@@ -153,7 +153,8 @@ impl MasterSession {
                             return self.handle_fragment_while_idle(io, writer, source, response).await
                         }
                         Some(TransportResponse::LinkLayerMessage(msg)) => self.notify_link_activity(msg.source),
-                        None => return Ok(())
+                        Some(TransportResponse::Error(_)) => return Ok(()), // ignore the malformed response
+                        None => return Ok(()),
                    }
                 }
             }
@@ -185,7 +186,8 @@ impl MasterSession {
                             return self.handle_fragment_while_idle(io, writer, source, response).await
                         }
                         Some(TransportResponse::LinkLayerMessage(msg)) => self.notify_link_activity(msg.source),
-                        None => return Ok(())
+                        Some(TransportResponse::Error(_)) => return Ok(()), // ignore the malformed response
+                        None => return Ok(()),
                    }
                 }
                 _ = crate::tokio::time::sleep_until(instant) => {
@@ -279,7 +281,7 @@ impl MasterSession {
             Ok(()) => Ok(()),
             Err(err) => match err {
                 TaskError::Shutdown => Err(RunError::Shutdown),
-                TaskError::Lower(err) => Err(RunError::Link(err)),
+                TaskError::Link(err) => Err(RunError::Link(err)),
                 _ => Ok(()),
             },
         }
@@ -354,7 +356,11 @@ impl MasterSession {
                                 }
                             }
                             Some(TransportResponse::LinkLayerMessage(msg)) => self.notify_link_activity(msg.source),
-                            None => continue
+                            Some(TransportResponse::Error(err)) => {
+                                task.on_task_error(self.associations.get_mut(destination).ok(), err.into());
+                                return Err(err.into());
+                            },
+                            None => continue,
                         }
                     }
                     y = self.process_message(true) => {
@@ -480,6 +486,7 @@ impl MasterSession {
                                 }
                             }
                             Some(TransportResponse::LinkLayerMessage(msg)) => self.notify_link_activity(msg.source),
+                            Some(TransportResponse::Error(err)) => return Err(err.into()),
                             None => continue
                         }
                     }
@@ -705,7 +712,8 @@ impl MasterSession {
                             self.notify_link_activity(msg.source);
                             return Ok(LinkStatusResult::Success);
                         }
-                        None => continue
+                        Some(TransportResponse::Error(_)) => return Ok(LinkStatusResult::UnexpectedResponse),
+                        None => continue,
                     }
                 }
                 y = self.process_message(true) => {

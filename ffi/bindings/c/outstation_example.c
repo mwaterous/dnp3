@@ -52,7 +52,7 @@ void solicited_confirm_received(uint8_t ecsn, void* context)
 
 }
 
-void solicited_confirm_wait_new_request(request_header_t header, void* context)
+void solicited_confirm_wait_new_request(void* context)
 {
 
 }
