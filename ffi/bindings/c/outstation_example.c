@@ -16,6 +16,10 @@ uint16_t get_processing_delay_ms(void* context)
 	return 0;
 }
 
+application_iin_t get_application_iin(void* context) {
+	return application_iin_init();
+}
+
 restart_delay_t cold_restart(void* context)
 {
 	return restart_delay_seconds(60);
@@ -354,6 +358,7 @@ int main()
 	outstation_application_t application =
 	{
 		.get_processing_delay_ms = &get_processing_delay_ms,
+		.get_application_iin = &get_application_iin,
 		.cold_restart = &cold_restart,
 		.warm_restart = &warm_restart,
 		.on_destroy = NULL,

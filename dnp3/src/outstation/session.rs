@@ -525,7 +525,7 @@ impl OutstationSession {
         &mut self,
         database: &mut DatabaseHandle,
     ) -> Option<(Sequence, usize)> {
-        let iin = self.get_response_iin() + Iin2::default();
+        let iin = self.get_response_iin();
         let mut cursor = self.unsol_tx_buffer.write_cursor();
         let _ = cursor.skip(ResponseHeader::LENGTH);
 
@@ -913,7 +913,7 @@ impl OutstationSession {
     }
 
     fn write_empty_solicited_response(&mut self, seq: Sequence, iin2: Iin2) -> usize {
-        let iin = Iin::new(self.get_response_iin(), iin2);
+        let iin = self.get_response_iin() | iin2;
         let header = ResponseHeader::new(
             ControlField::response(seq, true, true, false),
             ResponseFunction::Response,
@@ -925,7 +925,7 @@ impl OutstationSession {
     }
 
     fn write_null_unsolicited_response(&mut self, seq: Sequence) -> usize {
-        let iin = Iin::new(self.get_response_iin(), Iin2::default());
+        let iin = self.get_response_iin();
         let header = ResponseHeader::new(
             ControlField::unsolicited_response(seq),
             ResponseFunction::UnsolicitedResponse,
@@ -951,7 +951,7 @@ impl OutstationSession {
         };
 
         if let Some(seq) = seq {
-            let iin = Iin::new(self.get_response_iin(), Iin2::NO_FUNC_CODE_SUPPORT);
+            let iin = self.get_response_iin() | Iin2::NO_FUNC_CODE_SUPPORT;
             let header = ResponseHeader::new(
                 ControlField::single_response(seq),
                 ResponseFunction::Response,
@@ -984,14 +984,14 @@ impl OutstationSession {
         seq: Sequence,
         iin2: Iin2,
     ) -> (usize, Option<ResponseSeries>) {
-        let iin1 = self.get_response_iin();
+        let iin = self.get_response_iin() | iin2;
         let mut cursor = self.sol_tx_buffer.write_cursor();
         cursor.skip(ResponseHeader::LENGTH).unwrap();
         let info = database.write_response_headers(&mut cursor);
         let header = ResponseHeader::new(
             ControlField::response(seq, fir, info.complete, info.need_confirm()),
             ResponseFunction::Response,
-            iin1 + iin2,
+            iin,
         );
         cursor.at_start(|cur| header.write(cur)).unwrap();
         (cursor.written().len(), info.get_response_series(seq))
@@ -1102,7 +1102,7 @@ impl OutstationSession {
     }
 
     fn handle_delay_measure(&mut self, seq: Sequence, iin2: Iin2) -> usize {
-        let iin = self.get_response_iin() + iin2;
+        let iin = self.get_response_iin() | iin2;
 
         let g52v2 = Group52Var2 {
             time: self.application.get_processing_delay_ms(),
@@ -1129,7 +1129,7 @@ impl OutstationSession {
             Some(x) => x,
         };
 
-        let iin = self.get_response_iin() + iin2;
+        let iin = self.get_response_iin() | iin2;
 
         // respond with the delay
         let mut cursor = self.sol_tx_buffer.write_cursor();
@@ -1175,25 +1175,32 @@ impl OutstationSession {
             Ok(controls) => controls,
         };
 
-        let mut iin = self.get_response_iin() + Iin2::default();
-        let mut cursor = self.sol_tx_buffer.write_cursor();
-        cursor.skip(ResponseHeader::LENGTH).unwrap();
+        // Handle each operate and write the response
+        let (result, len) = {
+            let mut cursor = self.sol_tx_buffer.write_cursor();
+            cursor.skip(ResponseHeader::LENGTH).unwrap();
 
-        let mut control_tx = ControlTransaction::new(self.control_handler.borrow_mut());
-        let max_controls_per_request = self.config.max_controls_per_request;
+            let mut control_tx = ControlTransaction::new(self.control_handler.borrow_mut());
+            let max_controls_per_request = self.config.max_controls_per_request;
 
-        let result = database.transaction(|database| {
-            controls.operate_with_response(
-                &mut cursor,
-                OperateType::DirectOperate,
-                &mut control_tx,
-                database,
-                max_controls_per_request,
-            )
-        });
+            let result = database.transaction(|database| {
+                controls.operate_with_response(
+                    &mut cursor,
+                    OperateType::DirectOperate,
+                    &mut control_tx,
+                    database,
+                    max_controls_per_request,
+                )
+            });
+
+            (result, cursor.written().len())
+        };
+
+        // Calculate IIN and write it
+        let mut iin = self.get_response_iin();
 
         if let Ok(CommandStatus::NotSupported) = result {
-            iin = iin | Iin2::PARAMETER_ERROR;
+            iin |= Iin2::PARAMETER_ERROR;
         }
 
         let header = ResponseHeader::new(
@@ -1201,9 +1208,9 @@ impl OutstationSession {
             ResponseFunction::Response,
             iin,
         );
-        cursor.at_start(|cur| header.write(cur)).unwrap();
-
-        cursor.written().len()
+        let mut cursor = self.sol_tx_buffer.write_cursor();
+        header.write(&mut cursor).unwrap();
+        len
     }
 
     fn handle_enable_or_disable_unsolicited(
@@ -1292,22 +1299,27 @@ impl OutstationSession {
             Ok(controls) => controls,
         };
 
-        let mut iin = self.get_response_iin() + Iin2::default();
-        let mut cursor = self.sol_tx_buffer.write_cursor();
-        cursor.skip(ResponseHeader::LENGTH).unwrap();
+        // Handle each select and write the response
+        let (result, len) = {
+            let mut cursor = self.sol_tx_buffer.write_cursor();
+            cursor.skip(ResponseHeader::LENGTH).unwrap();
 
-        let mut transaction = ControlTransaction::new(self.control_handler.borrow_mut());
-        let max_controls_per_request = self.config.max_controls_per_request;
+            let mut transaction = ControlTransaction::new(self.control_handler.borrow_mut());
+            let max_controls_per_request = self.config.max_controls_per_request;
 
-        let result: Result<CommandStatus, WriteError> = database.transaction(|database| {
-            controls.select_with_response(
-                &mut cursor,
-                &mut transaction,
-                database,
-                max_controls_per_request,
-            )
-        });
+            let result: Result<CommandStatus, WriteError> = database.transaction(|database| {
+                controls.select_with_response(
+                    &mut cursor,
+                    &mut transaction,
+                    database,
+                    max_controls_per_request,
+                )
+            });
 
+            (result, cursor.written().len())
+        };
+
+        // Record the select state
         if let Ok(CommandStatus::Success) = result {
             self.state.select = Some(SelectState::new(
                 seq,
@@ -1317,8 +1329,11 @@ impl OutstationSession {
             ))
         }
 
+        // Calculate IIN and write it
+        let mut iin = self.get_response_iin();
+
         if let Ok(CommandStatus::NotSupported) = result {
-            iin = iin | Iin2::PARAMETER_ERROR;
+            iin |= Iin2::PARAMETER_ERROR;
         }
 
         let header = ResponseHeader::new(
@@ -1326,9 +1341,9 @@ impl OutstationSession {
             ResponseFunction::Response,
             iin,
         );
-        cursor.at_start(|cur| header.write(cur)).unwrap();
-
-        cursor.written().len()
+        let mut cursor = self.sol_tx_buffer.write_cursor();
+        header.write(&mut cursor).unwrap();
+        len
     }
 
     fn handle_operate(
@@ -1350,50 +1365,57 @@ impl OutstationSession {
             Ok(controls) => controls,
         };
 
-        let mut iin = self.get_response_iin() + Iin2::default();
-        let mut cursor = self.sol_tx_buffer.write_cursor();
-        cursor.skip(ResponseHeader::LENGTH).unwrap();
+        // Handle each operate and write the response
+        let (status, len) = {
+            let mut cursor = self.sol_tx_buffer.write_cursor();
+            cursor.skip(ResponseHeader::LENGTH).unwrap();
 
-        // determine if we have a matching SELECT
-        let status = match self.state.select {
-            Some(s) => {
-                match s.match_operate(
-                    self.config.select_timeout,
-                    seq,
-                    frame_id,
-                    object_headers.hash(),
-                ) {
-                    Err(status) => {
-                        controls.respond_with_status(&mut cursor, status).unwrap();
-                        status
-                    }
-                    Ok(()) => {
-                        let mut control_tx =
-                            ControlTransaction::new(self.control_handler.borrow_mut());
-                        let max_controls_per_request = self.config.max_controls_per_request;
-                        database
-                            .transaction(|db| {
-                                controls.operate_with_response(
-                                    &mut cursor,
-                                    OperateType::SelectBeforeOperate,
-                                    &mut control_tx,
-                                    db,
-                                    max_controls_per_request,
-                                )
-                            })
-                            .unwrap()
+            // determine if we have a matching SELECT
+            let status = match self.state.select {
+                Some(s) => {
+                    match s.match_operate(
+                        self.config.select_timeout,
+                        seq,
+                        frame_id,
+                        object_headers.hash(),
+                    ) {
+                        Err(status) => {
+                            controls.respond_with_status(&mut cursor, status).unwrap();
+                            status
+                        }
+                        Ok(()) => {
+                            let mut control_tx =
+                                ControlTransaction::new(self.control_handler.borrow_mut());
+                            let max_controls_per_request = self.config.max_controls_per_request;
+                            database
+                                .transaction(|db| {
+                                    controls.operate_with_response(
+                                        &mut cursor,
+                                        OperateType::SelectBeforeOperate,
+                                        &mut control_tx,
+                                        db,
+                                        max_controls_per_request,
+                                    )
+                                })
+                                .unwrap()
+                        }
                     }
                 }
-            }
-            None => {
-                let status = CommandStatus::NoSelect;
-                controls.respond_with_status(&mut cursor, status).unwrap();
-                status
-            }
+                None => {
+                    let status = CommandStatus::NoSelect;
+                    controls.respond_with_status(&mut cursor, status).unwrap();
+                    status
+                }
+            };
+
+            (status, cursor.written().len())
         };
 
+        // Calculate IIN and write it
+        let mut iin = self.get_response_iin();
+
         if status == CommandStatus::NotSupported {
-            iin = iin | Iin2::PARAMETER_ERROR;
+            iin |= Iin2::PARAMETER_ERROR;
         }
 
         let header = ResponseHeader::new(
@@ -1401,17 +1423,20 @@ impl OutstationSession {
             ResponseFunction::Response,
             iin,
         );
-        cursor.at_start(|cur| header.write(cur)).unwrap();
-
-        cursor.written().len()
+        let mut cursor = self.sol_tx_buffer.write_cursor();
+        header.write(&mut cursor).unwrap();
+        len
     }
 
-    fn get_response_iin(&self) -> Iin1 {
-        let mut iin1 = Iin1::default();
+    fn get_response_iin(&self) -> Iin {
+        let mut iin = Iin::default();
         if self.state.restart_iin_asserted {
-            iin1 |= Iin1::RESTART
+            iin |= Iin1::RESTART
         }
-        iin1
+
+        iin |= self.application.get_application_iin();
+
+        iin
     }
 
     fn process_broadcast(
